@@ -93,6 +93,8 @@ private final class ContextControllerContentSourceImpl: ContextControllerContent
 }
 
 public class ChatListControllerImpl: TelegramBaseController, ChatListController {
+    /// False for the root chat list in the tab bar, whose now-playing bar is the tab bar accessory.
+    public var displaysMediaPlaybackPanel: Bool = true
     private var validLayout: ContainerViewLayout?
     
     public let context: AccountContext

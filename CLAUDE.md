@@ -288,6 +288,30 @@ Three measured facts that are invisible from the code and each cost an investiga
   undocumented threshold. Watch for `NavigationBackgroundNode(color: .clear)`, whose `updateColor`
   early-return means the colour is never assigned even once.
 
+**Tab bar accessory (now playing).** `TabBarControllerImpl.setBottomAccessory` hosts a 48pt bar above the
+tab bar on every tab (Apple Music style; the system `UITabAccessory` needs `UITabBarController`, which
+Telegram does not use). The tab bar node places it and folds it into the current tab's bottom inset;
+hidden with the tab bar, a toolbar or tab bar search. `TelegramRootController` fills it with `MediaPlaybackTabAccessoryView` from its own
+`GlobalControlPanelsContext`, and the root chat list stops showing the now-playing header panel
+(`ChatListControllerImpl.displaysMediaPlaybackPanel`). Elsewhere (chats, other lists) that header panel,
+`MediaPlaybackHeaderPanelComponent`, draws the same bar on the header container's glass with a close
+button; the old `MediaNavigationAccessoryPanel` (scrubber, playback-rate button) is no longer used there. Both open the player through
+`openMediaPlaybackPlayer`; from the bar it passes `expandFromView`, and the overlay music player
+(`OverlayAudioPlayerController.expandsFromView`) morphs out of the bar and back into it, swipe-down
+dismissal included (`OverlayAudioPlayerControllerNode.morph`): a mask on the card goes from the bar's
+rect and radius to the card's, the card's content starts with its title row inside the bar, and a
+snapshot of the bar rides on top and crossfades. A flat modal is on screen from its first frame, before
+`viewDidAppear`, so the card and dim start hidden (`prepareForMorphIn`) until the morph shows them.
+Without the bar on screen the old slide is used.
+Above the playlist of a chat's music the player shows chips (`OverlayAudioPlayerChatChipsView`, avatar +
+truncated title): the playing chat, then the chats music was recently played from (`RecentMusicChats`,
+`UserDefaults`, fed by `TelegramRootController` on every music item), then chats from a global
+music-tagged search (chat search's Music tab: audio files, not voice), paged until 8 chats since one busy
+channel fills a page. The local chips show at once; search results are appended when they arrive. A chip
+only switches the list (`transitionToUpdatedHistoryNode(atMessage: nil)`); nothing plays until a track
+is tapped. The morph's start rect and bar snapshot are captured at tap time
+(`prepareMediaPlayerExpansion`): when the player appears the bar's tab can be out of the window.
+
 ## Swift 6.4: `[weak]` in a local closure that also captures a `var`
 
 Swift 6.4 (Xcode 27) miscompiles this shape, at `-Onone` as well as `-O`: a closure literal stored in

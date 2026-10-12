@@ -22,6 +22,10 @@ final class OverlayAudioPlayerControllerImpl: ViewController, OverlayAudioPlayer
     
     private var animatedIn = false
     
+    weak var expandsFromView: UIView?
+    var expandsFromFrame: CGRect?
+    var expandsFromSnapshot: UIView?
+    
     private var controllerNode: OverlayAudioPlayerControllerNode {
         return self.displayNode as! OverlayAudioPlayerControllerNode
     }
@@ -242,6 +246,12 @@ final class OverlayAudioPlayerControllerImpl: ViewController, OverlayAudioPlayer
         
         self.ready.set(self.controllerNode.ready.get())
         
+        // A flat modal is on screen from its first frame, before `viewDidAppear` starts the morph:
+        // keep the card hidden until then, or it would show fully opened and only then morph.
+        if self.expandsFromView != nil || self.expandsFromFrame != nil {
+            self.controllerNode.prepareForMorphIn()
+        }
+        
         self.displayNodeDidLoad()
     }
     
@@ -254,12 +264,13 @@ final class OverlayAudioPlayerControllerImpl: ViewController, OverlayAudioPlayer
         
         if !self.animatedIn {
             self.animatedIn = true
-            self.controllerNode.animateIn()
+            self.controllerNode.animateIn(fromView: self.expandsFromView, fromFrame: self.expandsFromFrame, snapshot: self.expandsFromSnapshot)
+            self.expandsFromSnapshot = nil
         }
     }
     
     override public func dismiss(completion: (() -> Void)? = nil) {
-        self.controllerNode.animateOut(completion: { [weak self] in
+        self.controllerNode.animateOut(toView: self.expandsFromView, completion: { [weak self] in
             if let _ = self?.navigationController {
                 self?.dismiss(animated: false, completion: nil)
             } else {

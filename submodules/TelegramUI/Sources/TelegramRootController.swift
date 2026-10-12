@@ -30,6 +30,8 @@ import PeerInfoScreen
 import PeerInfoStoryGridScreen
 import ShareWithPeersScreen
 import ChatEmptyNode
+import GlobalControlPanelsContext
+import MediaPlaybackHeaderPanelComponent
 
 private class DetailsChatPlaceholderNode: ASDisplayNode, NavigationDetailsPlaceholderNode {
     private var presentationData: PresentationData
@@ -75,6 +77,11 @@ public final class TelegramRootController: NavigationController, TelegramRootCon
     
     public var rootTabController: TabBarController?
     
+    private var nowPlayingPanelsContext: GlobalControlPanelsContext?
+    private var nowPlayingDisposable: Disposable?
+    private var nowPlayingMediaPlayback: GlobalControlPanelsContext.MediaPlayback?
+    private var nowPlayingAccessory: (accessory: TabBarBottomAccessory, view: MediaPlaybackTabAccessoryView)?
+    
     public var contactsController: ContactsController?
     public var callListController: CallListController?
     public var chatListController: ChatListController?
@@ -115,6 +122,7 @@ public final class TelegramRootController: NavigationController, TelegramRootCon
                 if previousTheme !== presentationData.theme {
                     (strongSelf.rootTabController as? TabBarControllerImpl)?.updateTheme(theme: presentationData.theme)
                     strongSelf.rootTabController?.statusBar.statusBarStyle = presentationData.theme.rootController.statusBarStyle.style
+                    strongSelf.updateNowPlayingAccessory(transition: .immediate)
                 }
             }
         })
@@ -146,6 +154,7 @@ public final class TelegramRootController: NavigationController, TelegramRootCon
         self.presentationDataDisposable?.dispose()
         self.applicationInFocusDisposable?.dispose()
         self.storyUploadEventsDisposable?.dispose()
+        self.nowPlayingDisposable?.dispose()
     }
     
     public func getContactsController() -> ViewController? {
@@ -192,6 +201,38 @@ public final class TelegramRootController: NavigationController, TelegramRootCon
         }
     
         super.containerLayoutUpdated(layout, transition: transition)
+    }
+    
+    private func updateNowPlayingAccessory(transition: ContainedViewLayoutTransition) {
+        guard let tabBarController = self.rootTabController as? TabBarControllerImpl else {
+            return
+        }
+        guard let mediaPlayback = self.nowPlayingMediaPlayback else {
+            if self.nowPlayingAccessory != nil {
+                self.nowPlayingAccessory = nil
+                tabBarController.setBottomAccessory(nil, transition: transition)
+            }
+            return
+        }
+        let accessory: TabBarBottomAccessory
+        let view: MediaPlaybackTabAccessoryView
+        if let current = self.nowPlayingAccessory {
+            accessory = current.accessory
+            view = current.view
+        } else {
+            view = MediaPlaybackTabAccessoryView(context: self.context, controller: { [weak tabBarController] in
+                return tabBarController
+            })
+            accessory = TabBarBottomAccessory(view: view, update: { [weak view] size, transition in
+                view?.updateLayout(size: size, transition: transition)
+            })
+            self.nowPlayingAccessory = (accessory, view)
+        }
+        view.update(data: mediaPlayback, theme: self.presentationData.theme, strings: self.presentationData.strings, nameDisplayOrder: self.presentationData.nameDisplayOrder)
+        if view.bounds.width > 0.0 {
+            view.updateLayout(size: view.bounds.size, transition: .immediate)
+        }
+        tabBarController.setBottomAccessory(accessory, transition: transition)
     }
     
     public func addRootControllers(showCallsTab: Bool) {
@@ -243,6 +284,35 @@ public final class TelegramRootController: NavigationController, TelegramRootCon
         self.accountSettingsController = accountSettingsController
         self.rootTabController = tabBarController
         self.pushViewController(tabBarController, animated: false)
+        
+        // Now playing lives above the tab bar on every tab (Apple Music style) instead of in the
+        // chat list header.
+        (chatListController as? ChatListControllerImpl)?.displaysMediaPlaybackPanel = false
+        let nowPlayingPanelsContext = GlobalControlPanelsContext(context: self.context, mediaPlayback: true, liveLocationMode: nil, groupCalls: nil, chatListNotices: false)
+        self.nowPlayingPanelsContext = nowPlayingPanelsContext
+        // A new tab bar (account switch) gets its own accessory.
+        self.nowPlayingAccessory = nil
+        self.nowPlayingDisposable?.dispose()
+        self.nowPlayingDisposable = (nowPlayingPanelsContext.state
+        |> map { state -> GlobalControlPanelsContext.MediaPlayback? in
+            guard let mediaPlayback = state.mediaPlayback else {
+                return nil
+            }
+            if let playlistLocation = mediaPlayback.playlistLocation as? PeerMessagesPlaylistLocation, case let .custom(_, _, _, _, hidePanel) = playlistLocation, hidePanel {
+                return nil
+            }
+            return mediaPlayback
+        }
+        |> deliverOnMainQueue).startStrict(next: { [weak self] mediaPlayback in
+            guard let self else {
+                return
+            }
+            self.nowPlayingMediaPlayback = mediaPlayback
+            if let mediaPlayback, case .music = mediaPlayback.kind, let itemId = mediaPlayback.item.id as? PeerMessagesMediaPlaylistItemId {
+                RecentMusicChats.note(peerId: itemId.messageId.peerId, accountPeerId: mediaPlayback.account.peerId)
+            }
+            self.updateNowPlayingAccessory(transition: .animated(duration: 0.4, curve: .spring))
+        })
     }
         
     public func updateRootControllers(showCallsTab: Bool) {

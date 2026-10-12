@@ -16,8 +16,17 @@ There are several things we require from **all developers** for the moment.
 ## Get the Code
 
 ```
-git clone --recursive -j8 https://github.com/TelegramMessenger/Telegram-iOS.git
+git clone --depth 1 https://github.com/ven1aone/Telegram-iOS-design.git
+cd Telegram-iOS-design
+git submodule init
+git config submodule.submodules/rlottie/rlottie.url https://github.com/TelegramMessenger/rlottie.git
+git config submodule.submodules/TgVoipWebrtc/tgcalls.url https://github.com/TelegramMessenger/tgcalls.git
+git submodule update --init --recursive --depth 1 --jobs 8
 ```
+
+The two local URL overrides resolve upstream submodules whose relative URLs otherwise
+point to sibling repositories under the fork owner's account. Their pinned commits
+remain those recorded by this repository.
 
 ## Setup Xcode
 
@@ -94,6 +103,87 @@ If you encounter this issue, re-run the project generation steps in the README.
 
 
 # Tips
+
+## Local simulator build on Apple Silicon
+
+Verified configuration: Xcode 27.1 beta (27A9269), the iOS 27.1 SDK and runtime,
+and an existing iPhone Duo simulator. The full build, installation, and welcome
+screen have been checked with this configuration.
+
+The compiler and Bazel versions are pinned in `versions.json`. `Make.py` downloads
+the matching Bazel binary and checks its SHA-256 automatically. When using a newer
+installed Xcode, pass `--overrideXcodeVersion` as shown below.
+
+For Xcode 27.1 beta unpacked in Downloads, select it for this shell before running
+build or simulator commands:
+
+```sh
+export DEVELOPER_DIR="$HOME/Downloads/Xcode.app/Contents/Developer"
+export BAZEL_ALLOW_NON_APPLICATIONS_XCODE=1
+xcodebuild -version
+```
+
+`BAZEL_ALLOW_NON_APPLICATIONS_XCODE=1` lets the Apple C/C++ toolchain register
+system include paths from Xcode installations outside `/Applications`. It is
+required here because the beta is in Downloads; otherwise Bazel rejects SDK
+headers as absolute, non-builtin includes.
+
+For the initial simulator build, use the repository's stock configuration and
+bundled fake provisioning data. No certificate import, Apple Developer team, or
+access to the private signing repository is needed for this simulator workflow.
+For simulator development with your own API credentials, copy the stock configuration
+to the ignored `build-input/development-configuration.json`, update `api_id` and
+`api_hash`, and pass that local file's path instead. This simulator recipe uses the
+stock bundle and team IDs to match the bundled fake provisioning data. For a custom
+bundle ID or device signing, follow **Adjust Configuration** and use matching
+provisioning data or Xcode-managed signing.
+
+Run from the repository root:
+
+```sh
+mkdir -p build/local-simulator
+python3 -u build-system/Make/Make.py \
+    --overrideXcodeVersion \
+    --cacheDir="$HOME/telegram-bazel-cache" \
+    build \
+    --configurationPath=build-system/appstore-configuration.json \
+    --codesigningInformationPath=build-system/fake-codesigning \
+    --buildNumber=100001 \
+    --configuration=debug_sim_arm64 \
+    > build/local-simulator/build-27.1-beta.log 2>&1
+```
+
+Choose an available **iPhone Duo running iOS 27.1** with
+`xcrun simctl list devices available`, then set `SIMULATOR_ID` to its UDID. Boot
+it if it is shut down. In Xcode 27, simulated devices are displayed in
+[Device Hub](https://developer.apple.com/documentation/xcode/device-hub):
+
+```sh
+SIMULATOR_ID="<iPhone Duo simulator UDID>"
+xcrun simctl boot "$SIMULATOR_ID"
+open "$DEVELOPER_DIR/../Applications/DeviceHub.app"
+xcrun simctl bootstatus "$SIMULATOR_ID" -b
+```
+
+Install the application extracted from the **current `.ipa`**. The intermediate
+`Telegram_archive-root` directory may contain binaries from an earlier build.
+Increase `--buildNumber` on subsequent builds so the simulator installs the new
+bundle while retaining its account data.
+
+```sh
+SIMULATOR_STAGE=$(mktemp -d)
+unzip -q bazel-bin/Telegram/Telegram.ipa -d "$SIMULATOR_STAGE"
+xcrun simctl install "$SIMULATOR_ID" "$SIMULATOR_STAGE/Payload/Telegram.app"
+xcrun simctl launch "$SIMULATOR_ID" ph.telegra.Telegraph
+xcrun simctl io "$SIMULATOR_ID" screenshot --display=1 build/local-simulator/launch.png
+rm -r "$SIMULATOR_STAGE"
+```
+
+The stock configuration's bundle ID is `ph.telegra.Telegraph`. If you use your own
+configuration, use its `bundle_id` when launching. To record a feature demo, run
+`xcrun simctl io "$SIMULATOR_ID" recordVideo --display=1 build/local-simulator/demo.mov`,
+perform the scenario in Device Hub, then stop recording with Control-C. The current
+setup checklist and diagnostic output are kept in ignored `build/local-simulator/`.
 
 ## Codesigning is not required for simulator-only builds
 

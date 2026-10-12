@@ -30,6 +30,8 @@ swift_library(
         "//submodules/UndoUI",
         "//submodules/OverlayStatusController",
         "//submodules/PresentationDataUtils",
+        "//submodules/PhotoResources:PhotoResources",
+        "//submodules/TelegramUI/Components/GlassBackgroundComponent",
     ],
     visibility = [
         "//visibility:public",

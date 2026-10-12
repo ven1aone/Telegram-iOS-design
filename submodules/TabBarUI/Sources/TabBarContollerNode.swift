@@ -14,17 +14,21 @@ final class TabBarControllerNode: ASDisplayNode {
         let toolbar: Toolbar?
         let isTabBarHidden: Bool
         let currentControllerSearchState: ViewController.TabBarSearchState?
+        /// Part of the cache key: setting or removing the accessory changes the layout and the inset.
+        let bottomAccessoryId: ObjectIdentifier?
         
         init(
             layout: ContainerViewLayout,
             toolbar: Toolbar?,
             isTabBarHidden: Bool,
-            currentControllerSearchState: ViewController.TabBarSearchState?
+            currentControllerSearchState: ViewController.TabBarSearchState?,
+            bottomAccessoryId: ObjectIdentifier?
         ) {
             self.layout = layout
             self.toolbar = toolbar
             self.isTabBarHidden = isTabBarHidden
             self.currentControllerSearchState = currentControllerSearchState
+            self.bottomAccessoryId = bottomAccessoryId
         }
     }
     
@@ -88,6 +92,9 @@ final class TabBarControllerNode: ASDisplayNode {
             }
             if let tabBarView = self.tabBarView.view {
                 self.view.bringSubviewToFront(tabBarView)
+            }
+            if let accessoryView = self.bottomAccessory?.view {
+                self.view.bringSubviewToFront(accessoryView)
             }
         }
         
@@ -168,6 +175,22 @@ final class TabBarControllerNode: ASDisplayNode {
         transition.updateAlpha(node: self.disabledOverlayNode, alpha: value ? 0.0 : 1.0)
     }
     
+    var bottomAccessory: TabBarBottomAccessory? {
+        didSet {
+            if self.bottomAccessory !== oldValue {
+                if let previousView = oldValue?.view {
+                    ComponentTransition.easeInOut(duration: 0.2).setAlpha(view: previousView, alpha: 0.0, completion: { [weak previousView] _ in
+                        previousView?.removeFromSuperview()
+                    })
+                }
+                if let view = self.bottomAccessory?.view {
+                    view.alpha = 0.0
+                    self.view.addSubview(view)
+                }
+            }
+        }
+    }
+    
     var tabBarHidden = false {
         didSet {
             if self.tabBarHidden != oldValue {
@@ -177,7 +200,7 @@ final class TabBarControllerNode: ASDisplayNode {
     }
     
     func containerLayoutUpdated(_ layout: ContainerViewLayout, toolbar: Toolbar?, transition: ContainedViewLayoutTransition) -> CGFloat {
-        let params = Params(layout: layout, toolbar: toolbar, isTabBarHidden: self.tabBarHidden, currentControllerSearchState: self.currentController?.tabBarSearchState)
+        let params = Params(layout: layout, toolbar: toolbar, isTabBarHidden: self.tabBarHidden, currentControllerSearchState: self.currentController?.tabBarSearchState, bottomAccessoryId: self.bottomAccessory.flatMap(ObjectIdentifier.init))
         if let layoutResult = self.layoutResult, layoutResult.params == params {
             return layoutResult.bottomInset
         } else {
@@ -300,6 +323,24 @@ final class TabBarControllerNode: ASDisplayNode {
         
         transition.updateFrame(node: self.disabledOverlayNode, frame: tabBarFrame)
         
+        // The accessory sits right above the tab bar, across the same width.
+        var accessoryFrame: CGRect?
+        if let accessory = self.bottomAccessory {
+            let isSearchActive = self.currentController?.tabBarSearchState?.isActive ?? false
+            let isVisible = !self.tabBarHidden && params.toolbar == nil && !isSearchActive
+            let frame = CGRect(x: sideInset, y: tabBarFrame.minY - 8.0 - TabBarBottomAccessory.height, width: params.layout.size.width - sideInset * 2.0, height: TabBarBottomAccessory.height)
+            if accessory.view.bounds.isEmpty {
+                accessory.view.frame = frame.offsetBy(dx: 0.0, dy: 16.0)
+            }
+            transition.updateFrame(view: accessory.view, frame: frame)
+            accessory.update(frame.size, transition)
+            ComponentTransition(transition.isAnimated ? transition : .animated(duration: 0.2, curve: .easeInOut)).setAlpha(view: accessory.view, alpha: isVisible ? 1.0 : 0.0)
+            accessory.view.isUserInteractionEnabled = isVisible
+            if isVisible {
+                accessoryFrame = frame
+            }
+        }
+        
         let toolbarHeight = 44.0
         let toolbarFrame = CGRect(origin: CGPoint(x: sideInset, y: params.layout.size.height - panelsBottomInset - toolbarHeight), size: CGSize(width: params.layout.size.width - sideInset * 2.0, height: toolbarHeight))
         
@@ -386,6 +427,9 @@ final class TabBarControllerNode: ASDisplayNode {
             }
         }
         
+        if let accessoryFrame {
+            return params.layout.size.height - accessoryFrame.minY
+        }
         return params.layout.size.height - tabBarFrame.minY
     }
     

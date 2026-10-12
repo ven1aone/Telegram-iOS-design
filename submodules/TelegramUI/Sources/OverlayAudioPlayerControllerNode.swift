@@ -25,7 +25,7 @@ final class OverlayAudioPlayerControllerNode: ViewControllerTracingNode, ASGestu
     private let context: AccountContext
     
     private let source: ChatHistoryListSource
-    private let chatLocation: ChatLocation
+    private var chatLocation: ChatLocation
     private var presentationData: PresentationData
     private let type: MediaManagerPlayerType
     private let requestDismiss: () -> Void
@@ -79,6 +79,13 @@ final class OverlayAudioPlayerControllerNode: ViewControllerTracingNode, ASGestu
     private var savedIdsPromise = Promise<Set<Int64>?>()
     private var savedIds: Set<Int64>?
     private var peer: EnginePeer?
+    
+    /// Chats with music (audio files, not voice messages), shown as chips above the playlist; a chip
+    /// switches the playlist to its chat.
+    private var musicChatChipItems: [OverlayAudioPlayerChatChipsView.Item] = []
+    private var musicChatChipsView: OverlayAudioPlayerChatChipsView?
+    private var musicChatsDisposable: Disposable?
+    private var musicChatsSearchDisposable: Disposable?
     
     private var copyProtectionEnabled = false
         
@@ -537,6 +544,8 @@ final class OverlayAudioPlayerControllerNode: ViewControllerTracingNode, ASGestu
             }
         })
         
+        self.loadMusicChats()
+        
         let copyProtectionEnabled: Signal<Bool, NoError>
         if case let .peer(peerId) = self.chatLocation {
             if let playlistLocation = self.playlistLocation as? PeerMessagesPlaylistLocation, case .savedMusic = playlistLocation {
@@ -609,6 +618,8 @@ final class OverlayAudioPlayerControllerNode: ViewControllerTracingNode, ASGestu
         self.replacementHistoryNodeReadyDisposable.dispose()
         self.dataDisposable?.dispose()
         self.saveMediaDisposable?.dispose()
+        self.musicChatsDisposable?.dispose()
+        self.musicChatsSearchDisposable?.dispose()
     }
     
     override func didLoad() {
@@ -929,6 +940,9 @@ final class OverlayAudioPlayerControllerNode: ViewControllerTracingNode, ASGestu
         var headerHeight: CGFloat = 38.0
         if let playlistLocation = self.playlistLocation as? PeerMessagesPlaylistLocation, case .savedMusic = playlistLocation {
             headerHeight = 78.0
+        } else if self.musicChatChipItems.count > 1 {
+            // Room for the chips row under the grabber; the card's top background is drawn for 78.
+            headerHeight = 78.0
         }
         return headerHeight
     }
@@ -1063,6 +1077,32 @@ final class OverlayAudioPlayerControllerNode: ViewControllerTracingNode, ASGestu
         
         transition.updateFrame(node: self.collapseNode, frame: CGRect(origin: CGPoint(x: 0.0, y: -7.0), size: CGSize(width: layout.size.width, height: 30.0)))
         
+        if self.musicChatChipItems.count > 1 {
+            let chipsView: OverlayAudioPlayerChatChipsView
+            if let current = self.musicChatChipsView {
+                chipsView = current
+            } else {
+                chipsView = OverlayAudioPlayerChatChipsView()
+                chipsView.selected = { [weak self] peerId in
+                    self?.selectMusicChat(peerId: peerId)
+                }
+                self.musicChatChipsView = chipsView
+                self.historyFrameNode.view.addSubview(chipsView)
+                chipsView.alpha = 0.0
+                ComponentTransition.easeInOut(duration: 0.2).setAlpha(view: chipsView, alpha: 1.0)
+            }
+            var selectedPeerId: EnginePeer.Id?
+            if case let .peer(peerId) = self.chatLocation {
+                selectedPeerId = peerId
+            }
+            let chipsFrame = CGRect(x: 0.0, y: 30.0, width: layout.size.width, height: 40.0)
+            transition.updateFrame(view: chipsView, frame: chipsFrame)
+            chipsView.update(context: self.context, items: self.musicChatChipItems, selectedPeerId: selectedPeerId, theme: self.presentationData.theme, strings: self.presentationData.strings, nameDisplayOrder: self.presentationData.nameDisplayOrder, size: chipsFrame.size, sideInset: 16.0)
+        } else if let chipsView = self.musicChatChipsView {
+            self.musicChatChipsView = nil
+            chipsView.removeFromSuperview()
+        }
+        
         self.updateHistoryContentOffset(self.historyNode.visibleContentOffset(), transition: transition)
         
         self.albumArtBackground.frame = CGRect(origin: .zero, size: layout.size)
@@ -1113,20 +1153,155 @@ final class OverlayAudioPlayerControllerNode: ViewControllerTracingNode, ASGestu
         self.getParentController()?.presentationContext.containerLayoutUpdated(layout, transition: transition)
     }
     
-    func animateIn() {
+    /// Hides the card and the dim until `animateIn` morphs them out of the now-playing bar.
+    func prepareForMorphIn() {
+        self.containerContainingNode.alpha = 0.0
+        self.dimNode.alpha = 0.0
+    }
+    
+    /// `fromFrame` (window coordinates) and `snapshot` are captured when the bar is tapped: by the
+    /// time the player appears, the tab hosting the bar can already be out of the window, so the bar
+    /// itself cannot be measured or drawn then.
+    func animateIn(fromView: UIView?, fromFrame: CGRect?, snapshot: UIView?) {
+        if let fromFrame, self.view.window != nil {
+            let barFrame = self.view.convert(fromFrame, from: nil)
+            self.morph(barView: fromView, barFrame: barFrame, snapshot: snapshot, expanding: true, completion: nil)
+            return
+        }
+        if let fromView, let barFrame = self.morphBarFrame(of: fromView) {
+            self.morph(barView: fromView, barFrame: barFrame, snapshot: nil, expanding: true, completion: nil)
+            return
+        }
+        
+        self.containerContainingNode.alpha = 1.0
+        self.dimNode.alpha = 1.0
         self.layer.animateBoundsOriginYAdditive(from: -self.bounds.size.height, to: 0.0, duration: 0.3, timingFunction: kCAMediaTimingFunctionSpring)
         self.dimNode.layer.animateAlpha(from: 0.0, to: 1.0, duration: 0.2)
         self.dimNode.layer.animatePosition(from: CGPoint(x: 0.0, y: -self.bounds.size.height), to: CGPoint(), duration: 0.3, timingFunction: kCAMediaTimingFunctionSpring, removeOnCompletion: true, additive: true)
     }
     
-    func animateOut(completion: (() -> Void)?) {
+    func animateOut(toView: UIView?, completion: (() -> Void)?) {
         self.dismissAllTooltips()
         
+        if let toView, let barFrame = self.morphBarFrame(of: toView) {
+            self.morph(barView: toView, barFrame: barFrame, snapshot: nil, expanding: false, completion: completion)
+            return
+        }
+        
+        if let toView, toView.isUserInteractionEnabled {
+            toView.alpha = 1.0
+        }
         self.layer.animateBoundsOriginYAdditive(from: self.bounds.origin.y, to: -self.bounds.size.height, duration: 0.3, timingFunction: kCAMediaTimingFunctionSpring, removeOnCompletion: false, completion: { _ in
             completion?()
         })
         self.dimNode.layer.animateAlpha(from: 1.0, to: 0.0, duration: 0.2, removeOnCompletion: false)
         self.dimNode.layer.animatePosition(from: CGPoint(), to: CGPoint(x: 0.0, y: -self.bounds.size.height), duration: 0.3, timingFunction: kCAMediaTimingFunctionSpring, removeOnCompletion: false, additive: true)
+    }
+    
+    /// The now-playing bar's frame in this node, or nil when it is not on screen (no window, or hidden
+    /// with the tab bar). The bar's own alpha is not a signal: the player hides it while open.
+    private func morphBarFrame(of view: UIView) -> CGRect? {
+        guard view.window != nil, view.window === self.view.window, view.isUserInteractionEnabled, !view.bounds.isEmpty else {
+            return nil
+        }
+        return view.convert(view.bounds, to: self.view)
+    }
+    
+    /// The player card as it is drawn: the part of the (slightly scaled) container below the top of
+    /// the playlist frame, in this node's coordinates.
+    private func morphCardFrame() -> CGRect {
+        let containerFrame = self.containerContainingNode.view.convert(self.containerContainingNode.bounds, to: self.view)
+        let historyTop = self.historyFrameNode.view.convert(self.historyFrameNode.bounds, to: self.view).minY
+        let top = min(max(containerFrame.minY, historyTop), containerFrame.maxY - 1.0)
+        return CGRect(x: containerFrame.minX, y: top, width: containerFrame.width, height: containerFrame.maxY - top)
+    }
+    
+    /// Apple Music style: the now-playing bar stretches into the player card (`expanding`) or the card
+    /// shrinks back into the bar. A mask on the card follows the bar's rectangle and corner radius; the
+    /// card's content starts with its title row inside the bar and slides into place; a snapshot of the
+    /// bar rides along on top and crossfades with the card.
+    private func morph(barView: UIView?, barFrame: CGRect, snapshot: UIView?, expanding: Bool, completion: (() -> Void)?) {
+        let containerView = self.containerContainingNode.view
+        let cardFrame = self.morphCardFrame()
+        let cardRadius: CGFloat = 38.0
+        let barRadius = barFrame.height * 0.5
+        
+        // The title row of the controls (artwork, title, artist) is where the bar's content lands.
+        let controlsFrame = self.controlsNode.view.convert(self.controlsNode.bounds, to: self.view)
+        let rowFrame = CGRect(x: cardFrame.minX, y: controlsFrame.minY + 12.0, width: cardFrame.width, height: barFrame.height)
+        let contentOffset = barFrame.midY - rowFrame.midY
+        
+        let mask = CALayer()
+        mask.backgroundColor = UIColor.black.cgColor
+        if #available(iOS 13.0, *) {
+            mask.cornerCurve = .continuous
+        }
+        let maskBarFrame = containerView.convert(barFrame, from: self.view)
+        let maskCardFrame = containerView.convert(cardFrame, from: self.view)
+        let scale = max(0.01, maskCardFrame.width / max(1.0, cardFrame.width))
+        containerView.layer.mask = mask
+        
+        // A picture of the bar as it looks on screen; the real one stays hidden while the card is up.
+        var barSnapshot = snapshot
+        if barSnapshot == nil, let barView {
+            barView.alpha = 1.0
+            barSnapshot = barView.snapshotView(afterScreenUpdates: true)
+        }
+        barView?.alpha = 0.0
+        if let barSnapshot {
+            barSnapshot.isUserInteractionEnabled = false
+            self.view.addSubview(barSnapshot)
+        }
+        
+        let duration: Double = expanding ? 0.5 : 0.42
+        let timing = kCAMediaTimingFunctionSpring
+        
+        let fromMaskFrame = expanding ? maskBarFrame : maskCardFrame
+        let toMaskFrame = expanding ? maskCardFrame : maskBarFrame
+        let fromMaskRadius = (expanding ? barRadius : cardRadius) * scale
+        let toMaskRadius = (expanding ? cardRadius : barRadius) * scale
+        mask.frame = toMaskFrame
+        mask.cornerRadius = toMaskRadius
+        mask.animateFrame(from: fromMaskFrame, to: toMaskFrame, duration: duration, timingFunction: timing, removeOnCompletion: expanding)
+        mask.animate(from: fromMaskRadius as NSNumber, to: toMaskRadius as NSNumber, keyPath: "cornerRadius", timingFunction: timing, duration: duration, removeOnCompletion: expanding)
+        
+        let fromContentOffset = CGPoint(x: 0.0, y: expanding ? contentOffset : 0.0)
+        let toContentOffset = CGPoint(x: 0.0, y: expanding ? 0.0 : contentOffset)
+        self.contentNode.layer.animatePosition(from: fromContentOffset, to: toContentOffset, duration: duration, timingFunction: timing, removeOnCompletion: expanding, additive: true)
+        
+        if let barSnapshot {
+            let snapshotBarFrame = barFrame
+            let snapshotCardFrame = rowFrame
+            barSnapshot.frame = expanding ? snapshotCardFrame : snapshotBarFrame
+            barSnapshot.layer.animateFrame(from: expanding ? snapshotBarFrame : snapshotCardFrame, to: expanding ? snapshotCardFrame : snapshotBarFrame, duration: duration, timingFunction: timing, removeOnCompletion: false)
+            if expanding {
+                barSnapshot.layer.animateAlpha(from: 1.0, to: 0.0, duration: 0.22, removeOnCompletion: false, completion: { [weak barSnapshot] _ in
+                    barSnapshot?.removeFromSuperview()
+                })
+            } else {
+                barSnapshot.layer.animateAlpha(from: 0.0, to: 1.0, duration: 0.2, delay: duration * 0.35, removeOnCompletion: false)
+            }
+        }
+        
+        if expanding {
+            self.containerContainingNode.alpha = 1.0
+            self.dimNode.alpha = 1.0
+            self.dimNode.layer.animateAlpha(from: 0.0, to: 1.0, duration: 0.3)
+            DispatchQueue.main.asyncAfter(deadline: .now() + duration, execute: { [weak self, weak mask] in
+                guard let self, let mask, self.containerContainingNode.layer.mask === mask else {
+                    return
+                }
+                self.containerContainingNode.layer.mask = nil
+            })
+        } else {
+            self.contentNode.layer.animateAlpha(from: 1.0, to: 0.0, duration: 0.18, delay: duration * 0.45, removeOnCompletion: false)
+            self.dimNode.layer.animateAlpha(from: 1.0, to: 0.0, duration: 0.25, removeOnCompletion: false)
+            DispatchQueue.main.asyncAfter(deadline: .now() + duration, execute: { [weak barView, weak barSnapshot] in
+                barView?.alpha = 1.0
+                barSnapshot?.removeFromSuperview()
+                completion?()
+            })
+        }
     }
     
     override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
@@ -1270,7 +1445,90 @@ final class OverlayAudioPlayerControllerNode: ViewControllerTracingNode, ASGestu
         }
     }
     
-    private func transitionToUpdatedHistoryNode(atMessage messageId: EngineMessage.Id) {
+    /// Builds the chat chips. The playing chat and the chats music was recently played from
+    /// (`RecentMusicChats`) are local and shown at once; chats found by a global search for
+    /// music-tagged messages (chat search's Music tab: audio files, not voice) are appended when the
+    /// search returns. One busy music channel can fill a whole search page, so pages are loaded until
+    /// enough distinct chats are found. Only for a chat's own music playlist.
+    private func loadMusicChats() {
+        guard case .music = self.type, case .default = self.source, case let .peer(currentPeerId) = self.chatLocation else {
+            return
+        }
+        let engine = self.context.engine
+        let minChats = 8
+        let maxPages = 4
+        
+        let recentPeerIds = RecentMusicChats.get(accountPeerId: self.context.account.peerId).filter { $0 != currentPeerId }
+        self.musicChatsDisposable = (engine.data.get(EngineDataList(([currentPeerId] + recentPeerIds).map(TelegramEngine.EngineData.Item.Peer.Peer.init)))
+        |> deliverOnMainQueue).startStrict(next: { [weak self] peers in
+            self?.addMusicChats(peers.compactMap { $0 })
+        })
+        
+        let location: SearchMessagesLocation = .general(scope: .everywhere, groupId: nil, tags: .music, minDate: nil, maxDate: nil, folderId: nil, communityId: nil)
+        func loadPage(state: SearchMessagesState?, page: Int, previousCount: Int) -> Signal<[EngineRawMessage], NoError> {
+            return engine.messages.searchMessages(location: location, query: "", state: state, limit: 100)
+            |> take(1)
+            |> mapToSignal { result, updatedState -> Signal<[EngineRawMessage], NoError> in
+                // `result` accumulates every page loaded so far.
+                let messages = result.messages
+                let chatCount = Set(messages.map(\.id.peerId)).count
+                if result.completed || chatCount >= minChats || page + 1 >= maxPages || messages.count == previousCount {
+                    return .single(messages)
+                }
+                return loadPage(state: updatedState, page: page + 1, previousCount: messages.count)
+            }
+        }
+        self.musicChatsSearchDisposable = (loadPage(state: nil, page: 0, previousCount: 0)
+        |> deliverOnMainQueue).startStrict(next: { [weak self] messages in
+            guard let self else {
+                return
+            }
+            var peers: [EnginePeer] = []
+            for message in messages.sorted(by: { $0.index > $1.index }) {
+                let peerId = message.id.peerId
+                if let peer = message.peers[peerId].flatMap(EnginePeer.init) {
+                    peers.append(peer)
+                }
+            }
+            self.addMusicChats(Array(peers.prefix(minChats * 4)), limit: max(minChats, self.musicChatChipItems.count))
+        })
+    }
+    
+    /// Appends chats that are not chips yet, up to `limit` chips in total.
+    private func addMusicChats(_ peers: [EnginePeer], limit: Int = .max) {
+        var items = self.musicChatChipItems
+        for peer in peers {
+            if items.count >= limit {
+                break
+            }
+            if !items.contains(where: { $0.peerId == peer.id }) {
+                items.append(OverlayAudioPlayerChatChipsView.Item(peer: peer))
+            }
+        }
+        if items == self.musicChatChipItems {
+            return
+        }
+        self.musicChatChipItems = items
+        if let layout = self.validLayout {
+            self.containerLayoutUpdated(layout, transition: .animated(duration: 0.3, curve: .spring))
+        }
+    }
+    
+    /// Switches the playlist to the music of another chat without starting playback: the list shows
+    /// that chat's tracks, and one starts playing when it is tapped.
+    private func selectMusicChat(peerId: EnginePeer.Id) {
+        if case let .peer(currentPeerId) = self.chatLocation, currentPeerId == peerId {
+            return
+        }
+        self.chatLocation = .peer(id: peerId)
+        self.transitionToUpdatedHistoryNode(atMessage: nil)
+        if let layout = self.validLayout {
+            self.containerLayoutUpdated(layout, transition: .animated(duration: 0.3, curve: .spring))
+        }
+    }
+    
+    /// `messageId` nil shows the newest messages (a chat switched to from the chips).
+    private func transitionToUpdatedHistoryNode(atMessage messageId: EngineMessage.Id?) {
         let tagMask: EngineMessage.Tags
         switch self.type {
             case .music:
@@ -1291,7 +1549,7 @@ final class OverlayAudioPlayerControllerNode: ViewControllerTracingNode, ASGestu
             adMessagesContext: nil,
             tag: .tag(tagMask),
             source: self.source,
-            subject: .message(id: .id(messageId), highlight: ChatControllerSubject.MessageHighlight(quote: nil), timecode: nil, setupReply: false),
+            subject: messageId.flatMap { .message(id: .id($0), highlight: ChatControllerSubject.MessageHighlight(quote: nil), timecode: nil, setupReply: false) },
             controllerInteraction: self.controllerInteraction,
             selectedMessages: .single(nil),
             mode: .list(reversed: self.currentIsReversed, reverseGroups: !self.currentIsReversed, displayHeaders: .none, hintLinks: false, isGlobalSearch: self.isGlobalSearch, isMusicPlaylist: true),

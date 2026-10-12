@@ -146,6 +146,18 @@ open class TabBarControllerImpl: ViewController, TabBarController {
         self.tabBarControllerNode.updateIsTabBarEnabled(value, transition: transition)
     }
     
+    /// Sets the bar shown above the tab bar on every tab (now playing, see `TabBarBottomAccessory`).
+    /// The current tab is laid out again, since its bottom inset includes the accessory.
+    public func setBottomAccessory(_ accessory: TabBarBottomAccessory?, transition: ContainedViewLayoutTransition) {
+        if self.tabBarControllerNode.bottomAccessory === accessory {
+            return
+        }
+        self.tabBarControllerNode.bottomAccessory = accessory
+        if let layout = self.validLayout {
+            self.containerLayoutUpdated(layout, transition: transition)
+        }
+    }
+    
     public func updateIsTabBarHidden(_ value: Bool, transition: ContainedViewLayoutTransition) {
         self.tabBarControllerNode.tabBarHidden = value
         if let layout = self.validLayout {

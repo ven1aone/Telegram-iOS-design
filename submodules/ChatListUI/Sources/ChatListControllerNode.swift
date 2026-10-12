@@ -1508,7 +1508,7 @@ final class ChatListControllerNode: ASDisplayNode, ASGestureRecognizerDelegate {
                 )))
             )
         }
-        if let mediaPlayback = self.controller?.globalControlPanelsContextState?.mediaPlayback {
+        if self.controller?.displaysMediaPlaybackPanel ?? true, let mediaPlayback = self.controller?.globalControlPanelsContextState?.mediaPlayback {
             if let playlistLocation = mediaPlayback.playlistLocation as? PeerMessagesPlaylistLocation, case let .custom(_, _, _, _, hidePanel) = playlistLocation, hidePanel {
                 
             } else {
